@@ -1,0 +1,8 @@
+# Climate Data Sources
+Precipitation Index: https://experience.arcgis.com/experience/568ddab184334f6b81a04d2fe9aac262/page/Indicadores-Ambientales/
+Temperature Anomaly: https://experience.arcgis.com/experience/568ddab184334f6b81a04d2fe9aac262/page/Indicadores-Ambientales/
+Mean Temperature: https://experience.arcgis.com/experience/568ddab184334f6b81a04d2fe9aac262/page/Indicadores-Ambientales/
+
+# Economic Data Source
+EMMET Manufacturing Survey: https://microdatos.dane.gov.co/index.php/catalog/emmett
+EMMET Documentation: https://microdatos.dane.gov.co/index.php/catalog/emmett/documentation
