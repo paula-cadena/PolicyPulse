@@ -1,0 +1,4 @@
+/climate_env
+/data_processed/*
+/data_raw/*
+.DS_Store

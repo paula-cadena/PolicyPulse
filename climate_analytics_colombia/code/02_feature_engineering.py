@@ -1,342 +1,295 @@
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
 import sys
 import os
-import joblib
+from fuzzywuzzy import fuzz
 
 sys.path.append(os.path.dirname(__file__))
-from utils import logger
+from utils import normalize_names, logger
 
-def merge_datasets(financial_data, precipitation_data, climate_features):
-    """
-    Merges financial data with precipitation data and climate features
-    """
-    logger.info("Merging financial and climate datasets")
+def substring_match_cities(unmatched_df, api_df, dept_threshold=80):
+    """Use substring matching for cities and fuzzy matching for departments"""
     
-    # Ensuring dates are datetime
-    financial_data['date'] = pd.to_datetime(financial_data['date'])
-    precipitation_data['date'] = pd.to_datetime(precipitation_data['date'])
+    # Getting unique city-department combinations
+    unique_combinations = unmatched_df[['city_norm', 'department_norm', 'city', 'department']].drop_duplicates()
     
-    # Merging financial data with precipitation data on municipality code and date
-    merged_data = pd.merge(financial_data, precipitation_data, 
-                          on=['municipality_code', 'date'], 
-                          how='inner')
+    logger.info(f"Applying substring matching for {len(unique_combinations)} unique city-department combinations...")
     
-    # Merging with climate features
-    merged_data = pd.merge(merged_data, climate_features,
-                          on='municipality_code',
-                          how='left')
+    matches = []
     
-    logger.info(f"Merged dataset: {len(merged_data)} records")
-    return merged_data
+    for _, row in unique_combinations.iterrows():
+        target_city = row['city_norm']
+        target_dept = row['department_norm']
+        
+        # Finding API cities where the target city is a substring of the API city name or vice versa
+        city_matches = []
+        for _, api_row in api_df.iterrows():
+            api_city = api_row['city_norm']
+            api_dept = api_row['department_norm']
+            
+            # Check if either city contains the other
+            if (target_city in api_city) or (api_city in target_city):
+                city_matches.append(api_row)
+        
+        if len(city_matches) > 0:
+            # For the city matches, finding the best department match using fuzzy matching
+            best_match = None
+            best_score = 0
+            
+            for api_row in city_matches:
+                dept_score = fuzz.token_sort_ratio(target_dept, api_row['department_norm'])
+                
+                if dept_score >= dept_threshold and dept_score > best_score:
+                    best_score = dept_score
+                    best_match = api_row
+            
+            if best_match is not None:
+                matches.append({
+                    'original_city': row['city'],
+                    'original_department': row['department'],
+                    'matched_city': best_match['city_api'],
+                    'matched_department': best_match['department_api'],
+                    'municipality_code': best_match['municipality_code'],
+                    'similarity_score': best_score
+                })
+    
+    return pd.DataFrame(matches)
 
-def create_additional_features(merged_data):
-    """Create additional features for modeling"""
-    logger.info("Creating additional features for modeling")
+def match_precipitation_to_municipalities(precipitation_data, municipality_data):
+    """Match precipitation data with municipality codes"""
+    logger.info("Matching precipitation data with municipality codes")
     
-    df = merged_data.copy()
+    # Normalizing names in both datasets
+    precipitation_data['city_norm'] = normalize_names(precipitation_data['city'])
+    precipitation_data['department_norm'] = normalize_names(precipitation_data['department'])
+    municipality_data['city_norm'] = normalize_names(municipality_data['city_api'])
+    municipality_data['department_norm'] = normalize_names(municipality_data['department_api'])
     
-    # Creating time-based features
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
-    df['quarter'] = df['date'].dt.quarter
+    # First merge - exact match
+    merged_df = pd.merge(
+        precipitation_data,
+        municipality_data,
+        left_on=['city_norm', 'department_norm'],
+        right_on=['city_norm', 'department_norm'],
+        how='left'
+    )
     
-    # Creating climate anomaly features
-    if 'precip_mean' in df.columns and 'precipitation' in df.columns:
-        df['precip_anomaly'] = df['precipitation'] - df['precip_mean']
-        if 'precip_std' in df.columns:
-            df['precip_std_anomaly'] = df['precip_anomaly'] / df['precip_std']
-            df['extreme_precip'] = (df['precip_std_anomaly'].abs() > 2).astype(int)
+    # Check unmatched cities
+    unmatched_mask = merged_df['municipality_code'].isna()
+    unmatched_count = unmatched_mask.sum()
     
-    # Creating lagged features
-    df = df.sort_values(['municipality_code', 'date'])
-    df['precip_lag1'] = df.groupby('municipality_code')['precipitation'].shift(1)
-    df['precip_lag2'] = df.groupby('municipality_code')['precipitation'].shift(2)
+    logger.info(f"Exact matches: {len(merged_df) - unmatched_count} cities")
+    logger.info(f"Unmatched after exact merge: {unmatched_count} cities")
     
-    # Creating rolling statistics
-    df['precip_rolling_3m'] = df.groupby('municipality_code')['precipitation'].rolling(3).mean().reset_index(0, drop=True)
-    df['precip_rolling_6m'] = df.groupby('municipality_code')['precipitation'].rolling(6).mean().reset_index(0, drop=True)
+    if unmatched_count > 0:
+        # Get unmatched rows for substring matching
+        unmatched_precipitation = precipitation_data[unmatched_mask].copy()
+        
+        # Applying substring matching
+        substring_matches = substring_match_cities(unmatched_precipitation, municipality_data)
+        
+        if len(substring_matches) > 0:
+            logger.info(f"Substring matches found: {len(substring_matches)} cities")
+            
+            # Applying substring matches to the main dataframe
+            for _, match in substring_matches.iterrows():
+                mask = (merged_df['city'] == match['original_city']) & (merged_df['department'] == match['original_department'])
+                merged_df.loc[mask, 'municipality_code'] = match['municipality_code']
+                
+            logger.info("Applied substring matches")
+            for _, match in substring_matches.iterrows():
+                logger.info(f"'{match['original_city']}' ({match['original_department']}) -> '{match['matched_city']}' ({match['matched_department']})")
     
-    # Dropping rows with NaN values from lagged features
-    initial_count = len(df)
-    df = df.dropna()
-    final_count = len(df)
+    # Manual assignment for specific cities that need special handling
+    manual_codes = {
+        'BOGOTA': '11001',
+        'SAMPUES': '70670', 
+        'SAN JOSE GUAVIARE': '95001'
+    }
     
-    logger.info(f"Final modeling dataset: {final_count} records (dropped {initial_count - final_count} due to missing values)")
+    for city_name, code in manual_codes.items():
+        mask = (merged_df['city_norm'] == city_name) & (merged_df['municipality_code'].isna())
+        if mask.any():
+            merged_df.loc[mask, 'municipality_code'] = code
+            logger.info(f"Manually assigned {city_name} with code: {code}")
     
-    return df
+    # Final unmatched count
+    final_unmatched = merged_df['municipality_code'].isna().sum()
+    if final_unmatched > 0:
+        unmatched_cities = merged_df[merged_df['municipality_code'].isna()][['city', 'department']].drop_duplicates()
+        logger.info(f"Still unmatched: {final_unmatched} records from {len(unmatched_cities)} cities")
+        for _, city in unmatched_cities.iterrows():
+            logger.info(f"- {city['city']} ({city['department']})")
+    
+    # Keeping only needed columns
+    final_df = merged_df[['date', 'year', 'month', 'city', 'department', 'precipitation', 'municipality_code']]
+    
+    # Calculating matching statistics
+    matched_count = final_df['municipality_code'].notna().sum()
+    total_count = len(final_df)
+    matched_cities = final_df[final_df['municipality_code'].notna()]['city'].nunique()
+    total_cities = final_df['city'].nunique()
+    
+    logger.info(f"Precipitation matching results:")
+    logger.info(f"Total records: {total_count}")
+    logger.info(f"Matched records: {matched_count} ({matched_count/total_count*100:.1f}%)")
+    logger.info(f"Cities matched: {matched_cities}/{total_cities} ({matched_cities/total_cities*100:.1f}%)")
+    
+    return final_df
 
-def clean_data_for_regression(X, y):
-    """Clean data for regression by ensuring all values are numeric and handling missing values"""
-    logger.info("Cleaning data for regression")
+def match_financial_to_municipalities(financial_data, municipality_data):
+    """Match financial data with municipality codes"""
+    logger.info("Matching financial data with municipality codes")
     
-    # Converting all columns to numeric, coercing errors to NaN
-    X_clean = X.apply(pd.to_numeric, errors='coerce')
-    y_clean = pd.to_numeric(y, errors='coerce')
+    # Normalizing names in both datasets
+    financial_data['city_norm'] = normalize_names(financial_data['city'])
+    financial_data['department_norm'] = normalize_names(financial_data['department'])
+    municipality_data['city_norm'] = normalize_names(municipality_data['city_api'])
+    municipality_data['department_norm'] = normalize_names(municipality_data['department_api'])
     
-    # Removing rows with any NaN values, to avoid errors in regression
-    non_missing_mask = X_clean.notna().all(axis=1) & y_clean.notna()
-    X_clean = X_clean[non_missing_mask]
-    y_clean = y_clean[non_missing_mask]
+    # First merge - exact match on normalized city and department name
+    merged_df = pd.merge(
+        financial_data,
+        municipality_data,
+        left_on=['city_norm', 'department_norm'],
+        right_on=['city_norm', 'department_norm'],
+        how='left'
+    )
     
-    logger.info(f"After cleaning: {len(X_clean)} records remaining")
+    # Check unmatched records
+    unmatched_mask = merged_df['municipality_code'].isna()
+    unmatched_count = unmatched_mask.sum()
     
-    return X_clean, y_clean
+    logger.info(f"Exact city+department matches: {len(merged_df) - unmatched_count} records")
+    logger.info(f"Unmatched after exact merge: {unmatched_count} records")
+    
+    if unmatched_count > 0:
+        # Applying substring matching for remaining cities
+        unmatched_data = financial_data[unmatched_mask].copy()
+        substring_matches = substring_match_financial_cities(unmatched_data, municipality_data)
+        
+        if len(substring_matches) > 0:
+            logger.info(f"Substring matches found: {len(substring_matches)} cities")
+            
+            # Applying substring matches to the main dataframe
+            for _, match in substring_matches.iterrows():
+                mask = (merged_df['city'] == match['original_city']) & \
+                       (merged_df['department'] == match['original_department'])
+                merged_df.loc[mask, 'municipality_code'] = match['municipality_code']
+    
+    # Manual assignment for specific cities
+    manual_codes = {
+        'BOGOTA': '11001',
+        'SAMPUES': '70670', 
+        'SAN JOSE GUAVIARE': '95001'
+    }
+    
+    for city_name, code in manual_codes.items():
+        mask = (merged_df['city_norm'] == city_name) & (merged_df['municipality_code'].isna())
+        if mask.any():
+            merged_df.loc[mask, 'municipality_code'] = code
+            logger.info(f"Manually assigned {city_name} with code: {code}")
+    
+    # Selecting only the columns we want to keep
+    columns_to_keep = ['date', 'credit_portfolio', 'savings_deposits', 'municipality_code']
+    final_df = merged_df[columns_to_keep]
+    
+    # Final stats
+    matched_count = final_df['municipality_code'].notna().sum()
+    logger.info(f"Financial data matching results:")
+    logger.info(f"Total records: {len(final_df)}")
+    logger.info(f"Records with municipality codes: {matched_count} ({matched_count/len(final_df)*100:.1f}%)")
+    
+    return final_df
 
-def run_simple_regression(model_data, outcome_var='credit_portfolio'):
-    """Run a simplified OLS regression without fixed effects first"""
-    logger.info(f"Running simple OLS regression for {outcome_var}")
+def substring_match_financial_cities(unmatched_financial, api_df, dept_threshold=80):
+    """Use substring matching for cities and fuzzy matching for departments - for financial data"""
     
-    # Selecting a simpler set of variables to avoid dimensionality issues
-    simple_vars = ['precipitation', 'precip_anomaly', 'month', 'quarter']
+    # Getting unique city-department combinations
+    unique_combinations = unmatched_financial[['city_norm', 'department_norm', 'city', 'department']].drop_duplicates()
     
-    # Defining available variables
-    available_vars = [var for var in simple_vars if var in model_data.columns]
+    logger.info(f"Applying substring matching for {len(unique_combinations)} unique city-department combinations...")
     
-    X = model_data[available_vars].copy()
-    y = model_data[outcome_var]
+    matches = []
     
-    # Cleaning the data
-    X_clean, y_clean = clean_data_for_regression(X, y)
-    
-    if len(X_clean) == 0:
-        logger.warning(f"No valid data for regression after cleaning for {outcome_var}")
-        return None
-    
-    # Adding a constant
-    X_clean = sm.add_constant(X_clean)
-    
-    # Running OLS regression
-    try:
-        model = sm.OLS(y_clean, X_clean).fit()
+    for _, row in unique_combinations.iterrows():
+        financial_city = row['city_norm']
+        financial_dept = row['department_norm']
         
-        logger.info(f"Simple regression completed for {outcome_var}")
-        logger.info(f"R-squared: {model.rsquared:.3f}")
-        logger.info(f"Number of observations: {len(X_clean)}")
-        
-        return model
-    except Exception as e:
-        logger.error(f"Error in simple regression: {e}")
-        return None
+        # Finding API cities where either city name contains the other
+        for _, api_row in api_df.iterrows():
+            api_city = api_row['city_norm']
+            api_dept = api_row['department_norm']
+            
+            # Checking if either city contains the other
+            if (financial_city in api_city) or (api_city in financial_city):
+                # Checking if departments are similar
+                dept_score = fuzz.token_sort_ratio(financial_dept, api_dept)
+                
+                if dept_score >= dept_threshold:
+                    matches.append({
+                        'original_city': row['city'],
+                        'original_department': row['department'],
+                        'matched_city': api_row['city_api'],
+                        'matched_department': api_row['department_api'],
+                        'municipality_code': api_row['municipality_code'],
+                        'similarity_score': dept_score
+                    })
+                    break  # Take the first good match
+    
+    return pd.DataFrame(matches)
 
-def run_panel_regression(model_data, outcome_var='credit_portfolio'):
-    """Run panel data regression to quantify climate impact"""
-    logger.info(f"Running panel regression for {outcome_var}")
+def create_climate_features(precipitation_data):
+    """Create climate variability features from precipitation data"""
+    logger.info("Creating climate variability features")
     
-    # Preparing variables for fixed effects regression
-    X_vars = ['precipitation', 'precip_anomaly', 'precip_std_anomaly', 
-              'extreme_precip', 'precip_lag1', 'precip_lag2',
-              'precip_rolling_3m', 'precip_rolling_6m',
-              'month', 'quarter']
+    # Sorting by municipality and date
+    precipitation_data = precipitation_data.sort_values(['municipality_code', 'date'])
     
-    # Selecting available variables
-    available_vars = [var for var in X_vars if var in model_data.columns]
+    # Calculating rolling statistics for climate variability
+    climate_features = precipitation_data.groupby('municipality_code').agg({
+        'precipitation': [
+            'mean',  # Average precipitation
+            'std',   # Precipitation variability
+            'min',   # Minimum precipitation
+            'max'    # Maximum precipitation
+        ]
+    }).round(2)
     
-    X = model_data[available_vars].copy()
-    y = model_data[outcome_var]
+    # Flatten column names
+    climate_features.columns = [f'precip_{col[1]}' for col in climate_features.columns]
+    climate_features = climate_features.reset_index()
     
-    # Cleaning the data
-    X_clean, y_clean = clean_data_for_regression(X, y)
-    
-    if len(X_clean) == 0:
-        logger.warning(f"No valid data for panel regression after cleaning for {outcome_var}")
-        return None
-    
-    # Adding a constant
-    X_clean = sm.add_constant(X_clean)
-    
-    # Adding municipality fixed effects using dummy variables
-    # Getting the corresponding municipality codes for the cleaned data
-    model_data_clean = model_data.loc[X_clean.index]
-    municipality_dummies = pd.get_dummies(model_data_clean['municipality_code'], prefix='mun', drop_first=True)
-    
-    # Ensuring dummies are numeric
-    municipality_dummies = municipality_dummies.apply(pd.to_numeric, errors='coerce')
-    
-    # Combining features
-    X_final = pd.concat([X_clean, municipality_dummies], axis=1)
-    
-    # Removing any remaining NaN values
-    non_missing_final = X_final.notna().all(axis=1)
-    X_final = X_final[non_missing_final]
-    y_final = y_clean[non_missing_final]
-    
-    if len(X_final) == 0:
-        logger.warning(f"No valid data after final cleaning for {outcome_var}")
-        return None
-    
-    # Running OLS regression with clustered standard errors
-    try:
-        model = sm.OLS(y_final, X_final).fit(cov_type='cluster', 
-                                           cov_kwds={'groups': model_data_clean.loc[X_final.index, 'municipality_code']})
-        
-        logger.info(f"Panel regression completed for {outcome_var}")
-        logger.info(f"R-squared: {model.rsquared:.3f}")
-        logger.info(f"Number of observations: {len(X_final)}")
-        logger.info(f"Number of municipalities: {model_data_clean.loc[X_final.index, 'municipality_code'].nunique()}")
-        
-        return model
-    except Exception as e:
-        logger.error(f"Error in panel regression: {e}")
-        logger.info("Falling back to simple OLS without clustering")
-        try:
-            model = sm.OLS(y_final, X_final).fit()
-            logger.info(f"Simple OLS completed as fallback. R-squared: {model.rsquared:.3f}")
-            return model
-        except Exception as e2:
-            logger.error(f"Error in fallback regression: {e2}")
-            return None
-
-def run_machine_learning(model_data, outcome_var='credit_portfolio'):
-    """Run machine learning model to predict outcomes"""
-    logger.info(f"Running Random Forest model for {outcome_var}")
-    
-    # Selecting simpler set for stability
-    feature_columns = ['precipitation', 'precip_anomaly', 'month', 'quarter', 'year']
-    
-    # Adding climate features if available
-    climate_features = ['precip_mean', 'precip_std', 'precip_min', 'precip_max']
-    for cf in climate_features:
-        if cf in model_data.columns:
-            feature_columns.append(cf)
-    
-    available_features = [col for col in feature_columns if col in model_data.columns]
-    
-    X = model_data[available_features]
-    y = model_data[outcome_var]
-    
-    # Cleaning the data
-    X_clean = X.apply(pd.to_numeric, errors='coerce')
-    y_clean = pd.to_numeric(y, errors='coerce')
-    
-    # Removing missing values
-    non_missing = X_clean.notna().all(axis=1) & y_clean.notna()
-    X_clean = X_clean[non_missing]
-    y_clean = y_clean[non_missing]
-    
-    if len(X_clean) < 100:  # Need minimum samples
-        logger.warning(f"Insufficient data for ML model: {len(X_clean)} samples")
-        return None, None, None
-    
-    # Spliting data
-    X_train, X_test, y_train, y_test = train_test_split(X_clean, y_clean, test_size=0.2, random_state=42)
-    
-    # Training model with simpler parameters for stability
-    try:
-        rf_model = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1, max_depth=10)
-        rf_model.fit(X_train, y_train)
-        
-        # Predicting and evaluating
-        y_pred = rf_model.predict(X_test)
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-        
-        logger.info(f"Random Forest results for {outcome_var}:")
-        logger.info(f"MSE: {mse:.2f}")
-        logger.info(f"R²: {r2:.3f}")
-        
-        # Featuring importance
-        feature_importance = pd.DataFrame({
-            'feature': available_features,
-            'importance': rf_model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        logger.info("Top 5 features by importance:")
-        for _, row in feature_importance.head().iterrows():
-            logger.info(f"  {row['feature']}: {row['importance']:.3f}")
-        
-        return rf_model, feature_importance, {'mse': mse, 'r2': r2}
-    
-    except Exception as e:
-        logger.error(f"Error in Random Forest: {e}")
-        return None, None, None
+    logger.info(f"Created climate features for {len(climate_features)} municipalities")
+    return climate_features
 
 def main():
-    """Main modeling function"""
-    logger.info("Starting modeling process")
+    """Main function for feature engineering"""
+    logger.info("Starting feature engineering process")
     
-    # Loading processed data
-    try:
-        financial_processed = pd.read_csv('data_processed/financial_processed.csv')
-        precipitation_processed = pd.read_csv('data_processed/precipitation_processed.csv') 
-        climate_features = pd.read_csv('data_processed/climate_features.csv')
-        
-        logger.info(f"Loaded financial data: {len(financial_processed)} records")
-        logger.info(f"Loaded precipitation data: {len(precipitation_processed)} records")
-        logger.info(f"Loaded climate features: {len(climate_features)} municipalities")
-        
-    except FileNotFoundError as e:
-        logger.error(f"Required data files not found: {e}")
-        logger.error("Please run steps 01 and 02 first")
-        return {}
+    # Loading raw data
+    precipitation_data = pd.read_csv('data_raw/precipitation_raw.csv')
+    municipality_data = pd.read_csv('data_raw/municipality_reference.csv')
+    financial_data = pd.read_csv('data_raw/financial_raw.csv')
     
-    # Checking if the data is available
-    if len(financial_processed) == 0 or len(precipitation_processed) == 0:
-        logger.error("No data available for modeling")
-        return {}
+    # Converting date columns
+    precipitation_data['date'] = pd.to_datetime(precipitation_data['date'])
+    financial_data['date'] = pd.to_datetime(financial_data['date'])
     
-    # Merging datasets
-    merged_data = merge_datasets(financial_processed, precipitation_processed, climate_features)
+    # Matching datasets
+    precipitation_matched = match_precipitation_to_municipalities(precipitation_data, municipality_data)
+    financial_matched = match_financial_to_municipalities(financial_data, municipality_data)
     
-    # Creating additional features
-    model_data = create_additional_features(merged_data)
+    # Creating climate features
+    climate_features = create_climate_features(precipitation_matched)
     
-    # Saving modeling dataset
-    model_data.to_csv('data_processed/modeling_dataset.csv', index=False)
+    # Saving processed data
+    precipitation_matched.to_csv('data_processed/precipitation_processed.csv', index=False)
+    financial_matched.to_csv('data_processed/financial_processed.csv', index=False)
+    climate_features.to_csv('data_processed/climate_features.csv', index=False)
     
-    # Running analyses for both outcome variables
-    outcomes = ['credit_portfolio', 'savings_deposits']
-    results = {}
-    
-    for outcome in outcomes:
-        logger.info(f"\n--- Analyzing impact on {outcome} ---")
-        
-        # Filtering to relevant data for this outcome
-        outcome_data = model_data[model_data[outcome].notna()].copy()
-        
-        if len(outcome_data) > 100:
-            # Trying simple regression
-            regression_model = run_simple_regression(outcome_data, outcome)
-            
-            # Trying panel regression if simple works
-            if regression_model is not None:
-                panel_model = run_panel_regression(outcome_data, outcome)
-            else:
-                panel_model = None
-                logger.warning(f"Skipping panel regression for {outcome} due to simple regression failure")
-            
-            # Running machine learning
-            ml_model, feature_importance, ml_metrics = run_machine_learning(outcome_data, outcome)
-            
-            # Storing results
-            results[outcome] = {
-                'simple_regression': regression_model,
-                'panel_regression': panel_model,
-                'ml_model': ml_model,
-                'feature_importance': feature_importance,
-                'ml_metrics': ml_metrics,
-                'n_observations': len(outcome_data)
-            }
-            
-            # Saving model artifacts if available
-            if ml_model is not None:
-                joblib.dump(ml_model, f'outputs/model_artifacts/rf_model_{outcome}.pkl')
-            if feature_importance is not None:
-                feature_importance.to_csv(f'outputs/tables/feature_importance_{outcome}.csv', index=False)
-            
-            # Saving regression summary
-            if regression_model is not None:
-                with open(f'outputs/tables/regression_summary_{outcome}.txt', 'w') as f:
-                    f.write(regression_model.summary().as_text())
-        else:
-            logger.warning(f"Insufficient data for {outcome}: only {len(outcome_data)} records")
-    
-    logger.info("Modeling completed successfully")
-    return results
+    logger.info("Feature engineering completed successfully")
+    return precipitation_matched, financial_matched, climate_features
 
 if __name__ == "__main__":
-    results = main()
+    precipitation_matched, financial_matched, climate_features = main()

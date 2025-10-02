@@ -1,0 +1,36 @@
+                            OLS Regression Results                            
+==============================================================================
+Dep. Variable:       savings_deposits   R-squared:                       0.069
+Model:                            OLS   Adj. R-squared:                  0.065
+Method:                 Least Squares   F-statistic:                     18.18
+Date:                Thu, 02 Oct 2025   Prob (F-statistic):           1.83e-26
+Time:                        04:39:23   Log-Likelihood:                -63154.
+No. Observations:                1977   AIC:                         1.263e+05
+Df Residuals:                    1968   BIC:                         1.264e+05
+Df Model:                           8                                         
+Covariance Type:            nonrobust                                         
+======================================================================================
+                         coef    std err          t      P>|t|      [0.025      0.975]
+--------------------------------------------------------------------------------------
+const              -1.028e+14   9.05e+12    -11.358      0.000   -1.21e+14   -8.51e+13
+precipitation       9.451e+11   8.07e+10     11.706      0.000    7.87e+11     1.1e+12
+precip_anomaly     -1.031e+12   8.84e+10    -11.668      0.000    -1.2e+12   -8.58e+11
+precip_std_anomaly -4.424e+11   9.04e+11     -0.489      0.625   -2.22e+12    1.33e+12
+extreme_precip      4.262e+12   2.53e+12      1.688      0.092    -6.9e+11    9.21e+12
+precip_lag1        -8.321e+10   9.23e+09     -9.012      0.000   -1.01e+11   -6.51e+10
+precip_lag2        -8.501e+10   8.83e+09     -9.628      0.000   -1.02e+11   -6.77e+10
+precip_rolling_3m    2.59e+11   2.22e+10     11.678      0.000    2.15e+11    3.02e+11
+precip_rolling_6m   1.866e+10   1.51e+10      1.237      0.216   -1.09e+10    4.82e+10
+month               2.803e+10   1.11e+11      0.252      0.801    -1.9e+11    2.46e+11
+quarter             9.343e+09   3.71e+10      0.252      0.801   -6.33e+10     8.2e+10
+==============================================================================
+Omnibus:                     2180.469   Durbin-Watson:                   0.053
+Prob(Omnibus):                  0.000   Jarque-Bera (JB):           129139.918
+Skew:                           5.697   Prob(JB):                         0.00
+Kurtosis:                      40.919   Cond. No.                     9.01e+17
+==============================================================================
+
+Notes:
+[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
+[2] The smallest eigenvalue is 1.52e-28. This might indicate that there are
+strong multicollinearity problems or that the design matrix is singular.
