@@ -119,7 +119,7 @@ chmod +x run.sh
 
 ---
 
-## 🔄 Reproducibility
+## Reproducibility
 
 This project follows reproducible research standards:
 
@@ -149,7 +149,7 @@ Core dependencies (see `requirements.txt` for complete list):
 
 ---
 
-## 📄 License & Attribution
+## License & Attribution
 
 ### Data Licenses
 - Climate Data: Public data from IDEAM (Colombian government)
