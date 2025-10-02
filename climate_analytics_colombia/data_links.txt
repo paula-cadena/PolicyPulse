@@ -1,0 +1,23 @@
+# Data Sources for Climate and Financial Analysis in Colombia
+Process was optimized to avoid additional access steps. This document is used as reference.
+
+## Climate Data
+- Source: IDEAM (Instituto de Hidrología, Meteorología y Estudios Ambientales)
+- Dataset: Monthly Precipitation Indices
+- URL: https://bart.ideam.gov.co/indiecosistemas/ind/clima/datos/D_indice_precipitacion.xlsx
+- License: Public data from Colombian government
+- Access: Direct download via HTTP
+
+## Municipality Reference Data
+- Source: Colombian Government Open Data Portal
+- Dataset: Municipalities of Colombia
+- API Endpoint: https://www.datos.gov.co/resource/gdxc-w37w.json
+- License: Public data from Colombian government
+- Access: Public API via Socrata
+
+## Financial Data  
+- Source: Superintendencia Financiera de Colombia
+- Dataset: Financial Indicators by Municipality
+- API Endpoint: https://www.datos.gov.co/resource/u2wk-tfe3.json
+- License: Public data from Colombian government
+- Access: Public API via Socrata
